@@ -123,7 +123,7 @@ class SQLite
         $count = $stmt->rowCount();
         $stmt->closeCursor();
         if ($count && preg_match('/^INSERT /i', $sql)) {
-            return (int) $this->queryValue('SELECT last_insert_rowid()');
+            return (int)$this->queryValue('SELECT last_insert_rowid()');
         }
 
         return $count;
@@ -223,13 +223,13 @@ class SQLite
     /**
      * Execute a query that returns a list of key-value pairs
      *
-     * The first column is used as key, the second as value. Any additional columns are ignored.
+     * The first column is used as key, the second as value. Additional columns throw a RuntimeException
      *
      * @param string $sql
      * @param ...mixed|array $params
      * @return array
      */
-    public function queryKeyValueList($sql, ...$params): array
+    public function queryKeyValueList(string $sql, ...$params): array
     {
         $result = $this->queryAll($sql, ...$params);
         if (!$result) return [];
@@ -243,6 +243,26 @@ class SQLite
             array_column($result, $val)
         );
     }
+
+    /**
+     * Execute a query that returns a list of values
+     *
+     * The first column is used as value. Additional columns throw a RuntimeException
+     *
+     * @param string $sql
+     * @param ...mixed|array $params
+     * @return array
+     */
+    public function queryValueList(string $sql, ...$params): array
+    {
+        $result = $this->queryAll($sql, ...$params);
+        if (!$result) return [];
+        if (count(array_keys($result[0])) != 1) {
+            throw new \RuntimeException('queryValueList expects a query that returns exactly one column');
+        }
+        return array_column($result, array_keys($result[0])[0]);
+    }
+
 
     /**
      * Get a config value from the opt table
