@@ -1,0 +1,18 @@
+{
+    "name": "splitbrain/php-sqlite",
+    "description": "A simple wrapper around pdo-sqlite with basic migration support and a few helper utils",
+    "type": "library",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "splitbrain\\phpsqlite\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Andreas Gohr",
+            "email": "andi@splitbrain.org"
+        }
+    ],
+    "require": {}
+}
