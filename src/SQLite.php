@@ -37,10 +37,18 @@ class SQLite
                 null,
                 null,
                 [
-                    \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION
+                    \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+                    \PDO::ATTR_TIMEOUT => 10, // wait for locks up to 10 seconds
                 ]
             );
             $this->pdo->exec('PRAGMA foreign_keys = ON;');
+
+            try {
+                // See https://www.sqlite.org/wal.html
+                $this->exec('PRAGMA journal_mode=WAL');
+            } catch (\Exception $e) {
+                // ignore if WAL is not supported
+            }
         }
     }
 
@@ -74,22 +82,48 @@ class SQLite
     }
 
     /**
-     * Execute a statement
+     * Execute a statement and return it
+     *
+     * @param string $sql
+     * @param ...mixed|array $parameters
+     * @return \PDOStatement Be sure to close the cursor yourself
+     * @throws \PDOException
+     */
+    public function query(string $sql, ...$parameters): \PDOStatement
+    {
+        if ($parameters && is_array($parameters[0])) $parameters = $parameters[0];
+
+        // Statement preparation sometime throws ValueErrors instead of PDOExceptions, we streamline here
+        try {
+            $stmt = $this->pdo->prepare($sql);
+        } catch (\Throwable $e) {
+            throw new \PDOException($e->getMessage(), (int)$e->getCode(), $e);
+        }
+
+        $stmt->execute($parameters);
+
+        return $stmt;
+    }
+
+
+    /**
+     * Execute a statement and return metadata
      *
      * Returns the last insert ID on INSERTs or the number of affected rows
      *
      * @param string $sql
-     * @param array $parameters
+     * @param ...mixed|array $parameters
      * @return int
+     * @throws \PDOException
      */
-    public function exec($sql, $parameters = [])
+    public function exec(string $sql, ...$parameters): int
     {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($parameters);
+        $stmt = $this->query($sql, ...$parameters);
 
         $count = $stmt->rowCount();
+        $stmt->closeCursor();
         if ($count && preg_match('/^INSERT /i', $sql)) {
-            return $this->queryValue('SELECT last_insert_rowid()');
+            return (int) $this->queryValue('SELECT last_insert_rowid()');
         }
 
         return $count;
@@ -98,17 +132,16 @@ class SQLite
     /**
      * Simple query abstraction
      *
-     * Returns all data
+     * Returns all data as an array of associative arrays
      *
      * @param string $sql
-     * @param array $params
-     * @return array|false
+     * @param ...mixed|array $params
+     * @return array
      * @throws \PDOException
      */
-    public function queryAll($sql, $params = [])
+    public function queryAll(string $sql, ...$params): array
     {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
+        $stmt = $this->query($sql, ...$params);
         $data = $stmt->fetchAll(\PDO::FETCH_ASSOC);
         $stmt->closeCursor();
         return $data;
@@ -118,16 +151,18 @@ class SQLite
      * Query one single row
      *
      * @param string $sql
-     * @param array $parameters
+     * @param ...mixed|array $params
      * @return array|null
+     * @throws \PDOException
      */
-    public function queryRecord($sql, $parameters = [])
+    public function queryRecord(string $sql, ...$params): ?array
     {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($parameters);
-        $row = $stmt->fetch();
+        $stmt = $this->query($sql, ...$params);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
         $stmt->closeCursor();
-        if (is_array($row) && count($row)) return $row;
+        if (is_array($row) && count($row)) {
+            return $row;
+        }
         return null;
     }
 
@@ -137,13 +172,12 @@ class SQLite
      * @param string $table
      * @param array $data
      * @param bool $replace Conflict resolution, replace or ignore
-     * @return void
+     * @return array|null Either the inserted row or null if nothing was inserted
+     * @throws \PDOException
      */
-    public function saveRecord($table, $data, $replace = true)
+    public function saveRecord(string $table, array $data, bool $replace = true): ?array
     {
-        $columns = array_map(function ($column) {
-            return '"' . $column . '"';
-        }, array_keys($data));
+        $columns = array_map(static fn($column) => '"' . $column . '"', array_keys($data));
         $values = array_values($data);
         $placeholders = array_pad([], count($columns), '?');
 
@@ -154,24 +188,60 @@ class SQLite
         }
 
         /** @noinspection SqlResolve */
-        $sql = $command . ' INTO "' . $table . '" (' . join(',', $columns) . ') VALUES (' . join(',', $placeholders) . ')';
-        $stm = $this->pdo->prepare($sql);
-        $stm->execute($values);
+        $sql = $command . ' INTO "' . $table . '" (' . implode(',', $columns) . ') VALUES (' . implode(
+                ',',
+                $placeholders
+            ) . ')';
+        $stm = $this->query($sql, $values);
+        $success = $stm->rowCount();
         $stm->closeCursor();
+
+        if ($success) {
+            $sql = 'SELECT * FROM "' . $table . '" WHERE rowid = last_insert_rowid()';
+            return $this->queryRecord($sql);
+        }
+        return null;
     }
 
     /**
      * Execute a query that returns a single value
      *
      * @param string $sql
-     * @param array $params
+     * @param ...mixed|array $params
      * @return mixed|null
+     * @throws \PDOException
      */
-    public function queryValue($sql, $params = [])
+    public function queryValue(string $sql, ...$params)
     {
-        $result = $this->queryAll($sql, $params);
-        if (is_array($result) && count($result)) return array_values($result[0])[0];
+        $result = $this->queryAll($sql, ...$params);
+        if (count($result)) {
+            return array_values($result[0])[0];
+        }
         return null;
+    }
+
+    /**
+     * Execute a query that returns a list of key-value pairs
+     *
+     * The first column is used as key, the second as value. Any additional columns are ignored.
+     *
+     * @param string $sql
+     * @param ...mixed|array $params
+     * @return array
+     */
+    public function queryKeyValueList($sql, ...$params): array
+    {
+        $result = $this->queryAll($sql, ...$params);
+        if (!$result) return [];
+        if (count(array_keys($result[0])) != 2) {
+            throw new \RuntimeException('queryKeyValueList expects a query that returns exactly two columns');
+        }
+        [$key, $val] = array_keys($result[0]);
+
+        return array_combine(
+            array_column($result, $key),
+            array_column($result, $val)
+        );
     }
 
     /**
@@ -181,7 +251,7 @@ class SQLite
      * @param mixed $default What to return if the value isn't set
      * @return mixed
      */
-    public function getOpt($conf, $default = null)
+    public function getOpt(string $conf, $default = null)
     {
         $value = $this->queryValue("SELECT val FROM opt WHERE conf = ?", [$conf]);
         if ($value === null) return $default;
@@ -191,11 +261,11 @@ class SQLite
     /**
      * Set a config value in the opt table
      *
-     * @param $conf
-     * @param $value
+     * @param string $conf
+     * @param mixed $value
      * @return void
      */
-    public function setOpt($conf, $value)
+    public function setOpt(string $conf, $value)
     {
         $this->exec('REPLACE INTO opt (conf,val) VALUES (?,?)', [$conf, $value]);
     }
@@ -211,7 +281,7 @@ class SQLite
      *
      * @return int
      */
-    protected function currentDbVersion()
+    protected function currentDbVersion(): int
     {
         $sql = "SELECT val FROM opt WHERE conf = 'dbversion'";
         try {
@@ -233,7 +303,7 @@ class SQLite
      * @param int $current
      * @return array
      */
-    protected function getMigrationsToApply($current)
+    protected function getMigrationsToApply(int $current): array
     {
         $files = glob($this->schemadir . '/*.sql');
         $upgrades = [];
@@ -252,7 +322,7 @@ class SQLite
      * @param string $file
      * @param int $version
      */
-    protected function applyMigration($file, $version)
+    protected function applyMigration(string $file, int $version)
     {
         $sql = file_get_contents($this->schemadir . '/' . $file);
 
