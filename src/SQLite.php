@@ -150,6 +150,8 @@ class SQLite
     /**
      * Query one single row
      *
+     * Returns the first row as an associative array or null if no row was found. Any additional rows are ignored.
+     *
      * @param string $sql
      * @param ...mixed|array $params
      * @return array|null
@@ -301,7 +303,7 @@ class SQLite
      *
      * @return int
      */
-    protected function currentDbVersion(): int
+    public function currentDbVersion(): int
     {
         $sql = "SELECT val FROM opt WHERE conf = 'dbversion'";
         try {
